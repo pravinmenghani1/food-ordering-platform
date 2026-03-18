@@ -1,0 +1,107 @@
+version: "3.9"
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+    ports: ["2181:2181"]
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    depends_on: [zookeeper]
+    ports: ["9092:9092", "29092:29092"]
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.52
+    ports:
+      - "16686:16686"
+      - "6831:6831/udp"
+
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports: ["9090:9090"]
+
+  grafana:
+    image: grafana/grafana:10.2.0
+    ports: ["3000:3000"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning
+
+  preprocessing-service:
+    build:
+      context: .
+      dockerfile: services/preprocessing-service/Dockerfile
+    ports: ["8001:8001"]
+
+  inference-service:
+    build:
+      context: .
+      dockerfile: services/inference-service/Dockerfile
+    ports: ["8002:8002"]
+    depends_on: [redis]
+    environment:
+      REDIS_URL: redis://redis:6379
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-mock}
+
+  fraud-service:
+    build:
+      context: .
+      dockerfile: services/fraud-service/Dockerfile
+    ports: ["8003:8003"]
+
+  image-gen-service:
+    build:
+      context: .
+      dockerfile: services/image-gen-service/Dockerfile
+    ports: ["8004:8004"]
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-mock}
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: api-gateway/Dockerfile
+    ports: ["8000:8000"]
+    depends_on:
+      - preprocessing-service
+      - inference-service
+      - fraud-service
+      - image-gen-service
+      - redis
+    environment:
+      PREPROCESSING_URL: http://preprocessing-service:8001
+      INFERENCE_URL: http://inference-service:8002
+      FRAUD_URL: http://fraud-service:8003
+      IMAGE_GEN_URL: http://image-gen-service:8004
+      KAFKA_BOOTSTRAP: kafka:9092
+      REDIS_URL: redis://redis:6379
+
+  feedback-consumer:
+    build:
+      context: .
+      dockerfile: event-system/Dockerfile
+    depends_on: [kafka]
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      PYTHONUNBUFFERED: "1"
